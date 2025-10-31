@@ -1,7 +1,23 @@
-Development of this repository is currently in a halt, due to lack of time. Updates are comming end of June.
+# Overlap
+- Overlap is a team-first chat assistant that nudges teammates toward each other.  
+- When someone asks a question, the system checks a shared, opt‑in skills index and, if relevant, suggests which teammate(s) might help — replacing solitary AI answers with socially aware guidance.
 
-working again ; ) 
-I am very busy at the moment so I would be very thankful for contributions and PR's
+## MVP (minimal viable product)
+- Simple web chat UI (single‑page) that sends {user_id, team_id, prompt} to the server.  
+- Team and user records with a short skills survey (store in SQLite for MVP).  
+- Backend augmentation: before calling the model, do a fast skill-match (keyword or simple normalization) and inject one short hint into the prompt if a teammate matches.  
+- Stream model responses back to the client unchanged except for the injected hint.  
+- Basic seed data, Docker support, and environment variable for the model API key.  
+- No production auth in MVP (trusted user_id); plan to add auth before public use.
+
+## User journey (MVP)
+1. Join or create a team and complete a quick skills survey.  
+2. Open chat and ask a question.  
+3. Server checks team skills and finds possible matches.  
+4. If a match exists, the reply includes a short suggestion like “Alice knows React — want to connect?”  
+5. Conversation is logged; skill usage counters may be updated for future recommendations.
+
+## User personas
 
 ## To do
 - [x] Double confirm when deleting conversation

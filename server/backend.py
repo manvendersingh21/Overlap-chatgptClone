@@ -9,6 +9,83 @@ import os
 
 from server.config import special_instructions
 
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from contextlib import contextmanager
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Database configuration
+DB_CONFIG = {
+    'host': os.getenv('DB_HOST', 'localhost'),
+    'database': os.getenv('DB_NAME', 'mydb'),
+    'user': os.getenv('DB_USER', 'postgres'),
+    'password': os.getenv('DB_PASSWORD', 'password'),
+    'port': os.getenv('DB_PORT', '5432')
+}
+
+@contextmanager
+def get_db_connection():
+    """
+    Context manager for database connections.
+    Automatically handles commit/rollback and connection closing.
+    
+    Usage:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute('SELECT * FROM table')
+                results = cur.fetchall()
+    """
+    conn = psycopg2.connect(**DB_CONFIG)
+    try:
+        yield conn
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()
+
+@contextmanager
+def get_db_cursor(dict_cursor=True):
+    """
+    Context manager that provides both connection and cursor.
+    Automatically handles commit/rollback and cleanup.
+    
+    Usage:
+        with get_db_cursor() as (conn, cur):
+            cur.execute('SELECT * FROM table')
+            results = cur.fetchall()
+    """
+    conn = psycopg2.connect(**DB_CONFIG)
+    cursor_factory = RealDictCursor if dict_cursor else None
+    cur = conn.cursor(cursor_factory=cursor_factory)
+    try:
+        yield conn, cur
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+
+def init_db():
+    """
+    Initialize database with required tables.
+    Call this when your app starts.
+    
+    Returns:
+        list: Query results from team_skills table
+    """
+    with get_db_cursor() as (conn, cur):
+        cur.execute('SELECT * FROM team_skills;')
+        results = cur.fetchall()
+    return results
+
+
 
 class Backend_Api:
     def __init__(self, app, config: dict) -> None:
@@ -27,12 +104,65 @@ class Backend_Api:
 
     def _conversation(self):
         try:
+
+            # --- START of user requested modification ---
+            team_skills_row = init_db()[0]
+            # 2. Construct the skills context string for the AI
+            team_skills_context = "\n\n--- CRITICAL CONTEXT: TEAM SKILLS ---\n" \
+                                  "You are an AI assistant for a specific team. Below is a list of your team members and their skills. " \
+                                  "**THIS IS YOUR MOST IMPORTANT KNOWLEDGE.**\n" \
+                                  "BEFORE answering any query about skills, programming, tools, or learning a topic (like 'React', 'Python', 'Docker', etc.), " \
+                                  "you MUST FIRST check this list. If the user's query matches a skill in this list, your PRIMARY response " \
+                                  "MUST be to identify the team member(s) who have that skill and suggest the user approach them.\n" \
+                                  "DO NOT provide general advice or external links for a topic if a team member is listed with that skill. " \
+                                  "Only provide general advice if no team member has the skill.\n\n" \
+                                  "Example:\n" \
+                                  "User: 'How do I learn React?'\n" \
+                                  "Your Correct Response: 'For questions about React, **user3@example.com** is the best person on our team to ask! They have it listed as one of their skills.'\n" \
+                                  "User: 'Who knows Docker?'\n" \
+                                  "Your Correct Response: 'That would be **user4@example.com**. They have experience with Docker and Kubernetes.'\n\n" \
+                                  "--- Team Skills List ---\n"
+
+            user_ids = team_skills_row.get("user_id", {})
+            soft_skills = team_skills_row.get("soft_skills", {})
+            hard_skills = team_skills_row.get("hard_skills", {})
+
+            for user_key, internal_id in user_ids.items():
+                team_skills_context += f"User: {user_ids[user_key]} \n"
+                
+                # Add soft skills
+                if user_key in soft_skills and soft_skills[user_key]:
+                    team_skills_context += f"  Soft Skills: {', '.join(soft_skills[user_key])}\n"
+                    
+                # Add hard skills
+                if user_key in hard_skills:
+                    user_hard_skills = hard_skills[user_key]
+                    hard_skill_parts = []
+                    if user_hard_skills.get("programming"):
+                        hard_skill_parts.append(f"Programming: {', '.join(user_hard_skills['programming'])}")
+                    if user_hard_skills.get("tools"):
+                        hard_skill_parts.append(f"Tools: {', '.join(user_hard_skills['tools'])}")
+                    
+                    if hard_skill_parts:
+                        team_skills_context += f"  Hard Skills: {'; '.join(hard_skill_parts)}\n"
+                    else:
+                        team_skills_context += "  Hard Skills: None listed\n"
+                
+                team_skills_context += "\n" # Add a newline for spacing between users
+
+            team_skills_context += "--- End of Team Skills List ---\n"
+            
+            # --- END of user requested modification ---
+
             jailbreak = request.json['jailbreak']
             internet_access = request.json['meta']['content']['internet_access']
             _conversation = request.json['meta']['content']['conversation']
             prompt = request.json['meta']['content']['parts'][0]
             current_date = datetime.now().strftime("%Y-%m-%d")
+            
+            # 3. Modify the system_message to include the new context
             system_message = f'You are ChatGPT also known as ChatGPT, a large language model trained by OpenAI. Strictly follow the users instructions. Knowledge cutoff: 2021-09-01 Current date: {current_date}'
+            system_message += team_skills_context # Appending the new context
 
             # Build proxies dict if proxy enabled in config. We'll prefer
             # an explicit proxy from config.json but we create a session
@@ -80,9 +210,13 @@ class Backend_Api:
                 # Map internal messages to Gemini 'contents' array. We skip the
                 # system message here because it will be passed as systemInstruction.
                 contents = []
+                system_instruction_text = system_message # Default system message
                 for msg in conversation:
                     role = msg.get('role', 'user')
                     if role == 'system':
+                        # Use the content of the first system message
+                        # (which now includes team skills) as the systemInstruction
+                        system_instruction_text = msg.get('content', '')
                         continue
                     mapped_role = 'user' if role == 'user' else 'model'
                     contents.append({
@@ -100,7 +234,7 @@ class Backend_Api:
 
                 body = {
                     'contents': contents,
-                    'systemInstruction': {'parts': [{'text': system_message}]},
+                    'systemInstruction': {'parts': [{'text': system_instruction_text}]}, # Use the modified system message
                     'generationConfig': request.json.get('generationConfig', {})
                 }
 
